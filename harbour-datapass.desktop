@@ -1,0 +1,30 @@
+[Desktop Entry]
+Type=Application
+X-Nemo-Application-Type=silica-qt5
+Icon=harbour-datapass
+Exec=harbour-datapass
+Name=DataPass
+Name[de]=DataPass
+Name[fr]=DataPass
+Name[fi]=DataPass
+
+# Übersetzbare Beschreibung
+Comment=Monitor your Telekom data usage
+Comment[de]=Überwache deine Telekom Datennutzung
+Comment[fr]=Surveillez votre utilisation des données Telekom
+Comment[fi]=Seuraa Telekom-datankäyttöäsi
+
+# Kategorien für den Store
+Categories=Network;Monitor;Utility
+# Version der App
+X-Nemo-Application-Version=1.0.0
+
+[X-Sailjail]
+OrganizationName=de.mneuroth
+ApplicationName=harbour-datapass
+# Benötigte Berechtigungen
+Permissions=Internet;WebView
+
+# Optional: Sharing-Funktionalität
+[X-Nemo-Sharing]
+Shares=none
