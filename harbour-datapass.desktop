@@ -2,7 +2,7 @@
 Type=Application
 X-Nemo-Application-Type=silica-qt5
 Icon=harbour-datapass
-Exec=harbour-datapass
+Exec=sailfish-qml harbour-datapass
 Name=DataPass
 Name[de]=DataPass
 Name[fr]=DataPass
