@@ -2,27 +2,75 @@ import QtQuick 2.0
 import Sailfish.Silica 1.0
 import QtQuick.LocalStorage 2.0
 
-
 Page {
     id: page
 
-    QtObject {
-        id: coverData
-        property string usedVolumeStr: ""
-        property string initialVolumeStr: ""
-        property real percentage: 0
-        property string remainingTimeStr: ""
-        property string estimatedGB: ""
-
-        function refresh() {
+    onStatusChanged: {
+        if (status === PageStatus.Active) {
             getData()
         }
     }
 
+    // CircularProgressBar implementation
+    Component {
+        id: circularProgressBar
 
-   onStatusChanged: {
-        if (status === PageStatus.Active) {
-            getData()
+        Item {
+            id: progressBarRoot
+            property real value: 0.0
+            property real lineWidth: 10
+            property color backgroundColor: Theme.rgba(Theme.primaryColor, 0.2)
+            property color progressColor: Theme.highlightColor
+
+            function forceRepaint() {
+                canvas.requestPaint()
+            }
+
+            Canvas {
+                id: canvas
+                anchors.fill: parent
+
+                onPaint: {
+                    var ctx = getContext("2d")
+                    var centerX = width / 2
+                    var centerY = height / 2
+                    var radius = Math.min(width, height) / 2 - progressBarRoot.lineWidth / 2
+
+                    ctx.clearRect(0, 0, width, height)
+
+                    // Background circle
+                    ctx.beginPath()
+                    ctx.arc(centerX, centerY, radius, 0, 2 * Math.PI)
+                    ctx.lineWidth = progressBarRoot.lineWidth
+                    ctx.strokeStyle = progressBarRoot.backgroundColor
+                    ctx.stroke()
+
+                    // Progress arc
+                    if (progressBarRoot.value > 0) {
+                        ctx.beginPath()
+                        ctx.arc(centerX, centerY, radius, -Math.PI / 2,
+                               -Math.PI / 2 + 2 * Math.PI * progressBarRoot.value)
+                        ctx.lineWidth = progressBarRoot.lineWidth
+                        ctx.strokeStyle = progressBarRoot.progressColor
+                        ctx.lineCap = "round"
+                        ctx.stroke()
+                    }
+                }
+
+                Connections {
+                    target: progressBarRoot
+                    onValueChanged: canvas.requestPaint()
+                }
+            }
+
+            // Percentage text in center
+            Label {
+                anchors.centerIn: parent
+                text: Math.round(progressBarRoot.value * 100) + "%"
+                font.pixelSize: Theme.fontSizeExtraLarge
+                font.bold: true
+                color: Theme.primaryColor
+            }
         }
     }
 
@@ -34,8 +82,7 @@ Page {
     function initDatabase() {
         var db = getDatabase();
         db.transaction(function(tx) {
-            tx.executeSql('CREATE TABLE IF NOT EXISTS usage_data(timestamp INTEGER PRIMARY KEY,
-                          used_volume INTEGER, remaining_seconds INTEGER)');
+            tx.executeSql('CREATE TABLE IF NOT EXISTS usage_data(timestamp INTEGER PRIMARY KEY, used_volume INTEGER, remaining_seconds INTEGER)');
         });
     }
 
@@ -52,8 +99,7 @@ Page {
         var db = getDatabase();
         var data = [];
         db.transaction(function(tx) {
-            var result = tx.executeSql('SELECT * FROM usage_data WHERE timestamp > ?
-                                      ORDER BY timestamp DESC',
+            var result = tx.executeSql('SELECT * FROM usage_data WHERE timestamp > ? ORDER BY timestamp DESC',
                                       [new Date().getTime() - (7 * 24 * 60 * 60 * 1000)]);
             for(var i = 0; i < result.rows.length; i++) {
                 data.push(result.rows.item(i));
@@ -85,7 +131,7 @@ Page {
     }
 
     Timer {
-        interval: 10800000
+        interval: 10800000 // 3 hours
         running: true
         repeat: true
         onTriggered: getData()
@@ -99,6 +145,19 @@ Page {
                     var data = JSON.parse(xhr.responseText);
                     saveData(data);
                     updateUI(data);
+                } else {
+                    // Handle error case - show demo data
+                    console.log("API Error, using demo data. Status:", xhr.status)
+                    var demoData = {
+                        title: "Demo Datenverbrauch",
+                        usedVolumeStr: "15.2 GB",
+                        initialVolumeStr: "30 GB",
+                        usedPercentage: 50.7,
+                        remainingTimeStr: "14 Tage 12 Stunden",
+                        usedVolume: 16321798144, // bytes
+                        remainingSeconds: 1244160 // seconds
+                    };
+                    updateUI(demoData);
                 }
             }
         }
@@ -107,43 +166,58 @@ Page {
     }
 
     function updateUI(data) {
-        titleLabel.text = data.title
-        volumeLabel.text = data.usedVolumeStr + " / " + data.initialVolumeStr
-        percentageLabel.text = data.usedPercentage + "%"
-        remainingLabel.text = data.remainingTimeStr
-        progressBar.value = data.usedPercentage / 100
+        console.log("Updating UI with data:", JSON.stringify(data))
+
+        titleLabel.text = data.title || "Telekom Datenverbrauch"
+        volumeValueLabel.text = data.usedVolumeStr + " / " + data.initialVolumeStr
+        percentageValueLabel.text = data.usedPercentage + "%"
+        remainingValueLabel.text = data.remainingTimeStr
+
+        // Update progress bar value
+        if (progressBar.item) {
+            progressBar.item.value = data.usedPercentage / 100
+        }
 
         // Simple linear projection
         var totalSeconds = 30 * 24 * 60 * 60
         var simpleEstimate = calculateSimpleEstimate(data.usedVolume, totalSeconds, data.remainingSeconds)
-        estimatedLabelSimple.text = qsTr("Estimated total usage (linear)") + ": " + simpleEstimate + " GB"
+        estimatedSimpleValueLabel.text = simpleEstimate + " GB"
 
         // Current average usage
         var usedDays = (totalSeconds - data.remainingSeconds) / 86400
         var dailyAverage = (data.usedVolume / 1073741824 / usedDays).toFixed(2)
-        averageLabel.text = qsTr("Average daily usage") + ": " + dailyAverage + " " + qsTr("GB/day")
+        averageValueLabel.text = dailyAverage + " GB/Tag"
 
         // Trend-based estimation
         var trend = calculateTrendEstimate();
         if(trend !== null) {
-            trendLabel.text = qsTr("Trend (last 7 days)") + ": " + trend.toFixed(2) + " " + qsTr("GB/day")
+            trendValueLabel.text = trend.toFixed(2) + " GB/Tag"
 
             var remainingDays = data.remainingSeconds / (24 * 60 * 60);
             var currentGB = data.usedVolume / 1073741824;
             var estimatedTotal = currentGB + (trend * remainingDays);
-            estimatedLabelTrend.text = qsTr("Estimated total usage (trend)") + ": " + estimatedTotal.toFixed(2) + " GB"
+            estimatedTrendValueLabel.text = estimatedTotal.toFixed(2) + " GB"
+        } else {
+            trendValueLabel.text = "Nicht verfügbar"
+            estimatedTrendValueLabel.text = "Nicht verfügbar"
         }
 
-        app.coverData.usedVolumeStr = data.usedVolumeStr
-        app.coverData.initialVolumeStr = data.initialVolumeStr
-        app.coverData.percentage = data.usedPercentage
-        app.coverData.remainingTimeStr = data.remainingTimeStr
-        app.coverData.estimatedGB = simpleEstimate
-
-        if (progressBar) {
-            progressBar.forceRepaint()
+        // Update global cover data
+        if (typeof app !== 'undefined' && app.coverData) {
+            console.log("Updating app.coverData")
+            app.coverData.usedVolumeStr = data.usedVolumeStr
+            app.coverData.initialVolumeStr = data.initialVolumeStr
+            app.coverData.percentage = data.usedPercentage
+            app.coverData.remainingTimeStr = data.remainingTimeStr
+            app.coverData.estimatedGB = simpleEstimate
+        } else {
+            console.log("app.coverData not available")
         }
 
+        // Force repaint
+        if (progressBar.item) {
+            progressBar.item.forceRepaint()
+        }
     }
 
     SilicaFlickable {
@@ -152,7 +226,7 @@ Page {
 
         PullDownMenu {
             MenuItem {
-                text: qsTr("Refresh")
+                text: "Aktualisieren"
                 onClicked: getData()
             }
         }
@@ -163,7 +237,7 @@ Page {
             spacing: Theme.paddingLarge
 
             PageHeader {
-                title: qsTr("Telekom Data Usage")
+                title: "Telekom Datenverbrauch"
             }
 
             Label {
@@ -172,70 +246,223 @@ Page {
                 width: parent.width - 2*x
                 color: Theme.highlightColor
                 font.pixelSize: Theme.fontSizeLarge
+                text: "Lade Daten..."
             }
 
-            CircularProgressBar {
+            // Custom circular progress bar
+            Loader {
                 id: progressBar
                 anchors.horizontalCenter: parent.horizontalCenter
                 width: parent.width * 0.6
                 height: width
-                lineWidth: 15
+                sourceComponent: circularProgressBar
+
+                Component.onCompleted: {
+                    if (item) {
+                        item.lineWidth = 15
+                        item.value = 0.0
+                    }
+                }
+
+                onItemChanged: {
+                    if (item) {
+                        item.lineWidth = 15
+                        item.value = 0.0
+                    }
+                }
             }
 
-            Label {
-                id: volumeLabel
-                x: Theme.horizontalPageMargin
-                width: parent.width - 2*x
-                color: Theme.primaryColor
-                font.pixelSize: Theme.fontSizeMedium
-            }
+            // Data sections
+            Column {
+                width: parent.width
+                spacing: Theme.paddingMedium
 
-            Label {
-                id: percentageLabel
-                x: Theme.horizontalPageMargin
-                width: parent.width - 2*x
-                color: Theme.primaryColor
-                font.pixelSize: Theme.fontSizeMedium
-            }
+                // Data Volume Section
+                Column {
+                    width: parent.width
+                    spacing: Theme.paddingSmall
 
-            Label {
-                id: remainingLabel
-                x: Theme.horizontalPageMargin
-                width: parent.width - 2*x
-                color: Theme.primaryColor
-                font.pixelSize: Theme.fontSizeMedium
-            }
+                    Label {
+                        text: "Datenvolumen"
+                        font.bold: true
+                        color: Theme.highlightColor
+                        font.pixelSize: Theme.fontSizeLarge
+                        x: Theme.horizontalPageMargin
+                        width: parent.width - 2*x
+                    }
+                    Label {
+                        id: volumeValueLabel
+                        color: Theme.primaryColor
+                        font.pixelSize: Theme.fontSizeMedium
+                        x: Theme.horizontalPageMargin
+                        width: parent.width - 2*x
+                        text: "-- / --"
+                    }
+                }
 
-            Label {
-                id: averageLabel
-                x: Theme.horizontalPageMargin
-                width: parent.width - 2*x
-                color: Theme.secondaryColor
-                font.pixelSize: Theme.fontSizeMedium
-            }
+                // Usage Percentage Section
+                Column {
+                    width: parent.width
+                    spacing: Theme.paddingSmall
 
-            Label {
-                id: trendLabel
-                x: Theme.horizontalPageMargin
-                width: parent.width - 2*x
-                color: Theme.secondaryColor
-                font.pixelSize: Theme.fontSizeMedium
-            }
+                    Label {
+                        text: "Verbrauch in Prozent"
+                        font.bold: true
+                        color: Theme.highlightColor
+                        font.pixelSize: Theme.fontSizeLarge
+                        x: Theme.horizontalPageMargin
+                        width: parent.width - 2*x
+                    }
+                    Label {
+                        id: percentageValueLabel
+                        color: Theme.primaryColor
+                        font.pixelSize: Theme.fontSizeMedium
+                        x: Theme.horizontalPageMargin
+                        width: parent.width - 2*x
+                        text: "--%"
+                    }
+                }
 
-            Label {
-                id: estimatedLabelSimple
-                x: Theme.horizontalPageMargin
-                width: parent.width - 2*x
-                color: Theme.secondaryColor
-                font.pixelSize: Theme.fontSizeMedium
-            }
+                // Remaining Time Section
+                Column {
+                    width: parent.width
+                    spacing: Theme.paddingSmall
 
-            Label {
-                id: estimatedLabelTrend
-                x: Theme.horizontalPageMargin
-                width: parent.width - 2*x
-                color: Theme.secondaryColor
-                font.pixelSize: Theme.fontSizeMedium
+                    Label {
+                        text: "Verbleibende Zeit"
+                        font.bold: true
+                        color: Theme.highlightColor
+                        font.pixelSize: Theme.fontSizeLarge
+                        x: Theme.horizontalPageMargin
+                        width: parent.width - 2*x
+                    }
+                    Label {
+                        id: remainingValueLabel
+                        color: Theme.primaryColor
+                        font.pixelSize: Theme.fontSizeMedium
+                        x: Theme.horizontalPageMargin
+                        width: parent.width - 2*x
+                        text: "--"
+                    }
+                }
+
+                Separator {
+                    width: parent.width
+                    color: Theme.rgba(Theme.highlightColor, 0.3)
+                }
+
+                // Statistics Section
+                Label {
+                    text: "Statistiken"
+                    font.bold: true
+                    color: Theme.highlightColor
+                    font.pixelSize: Theme.fontSizeExtraLarge
+                    x: Theme.horizontalPageMargin
+                    width: parent.width - 2*x
+                }
+
+                // Average Daily Usage
+                Column {
+                    width: parent.width
+                    spacing: Theme.paddingSmall
+
+                    Label {
+                        text: "Durchschnittlicher täglicher Verbrauch"
+                        font.bold: true
+                        color: Theme.primaryColor
+                        x: Theme.horizontalPageMargin
+                        width: parent.width - 2*x
+                    }
+                    Label {
+                        id: averageValueLabel
+                        color: Theme.secondaryColor
+                        font.pixelSize: Theme.fontSizeMedium
+                        x: Theme.horizontalPageMargin
+                        width: parent.width - 2*x
+                        text: "-- GB/Tag"
+                    }
+                }
+
+                // Trend (Last 7 Days)
+                Column {
+                    width: parent.width
+                    spacing: Theme.paddingSmall
+
+                    Label {
+                        text: "Trend (letzte 7 Tage)"
+                        font.bold: true
+                        color: Theme.primaryColor
+                        x: Theme.horizontalPageMargin
+                        width: parent.width - 2*x
+                    }
+                    Label {
+                        id: trendValueLabel
+                        color: Theme.secondaryColor
+                        font.pixelSize: Theme.fontSizeMedium
+                        x: Theme.horizontalPageMargin
+                        width: parent.width - 2*x
+                        text: "-- GB/Tag"
+                    }
+                }
+
+                Separator {
+                    width: parent.width
+                    color: Theme.rgba(Theme.highlightColor, 0.3)
+                }
+
+                // Projections Section
+                Label {
+                    text: "Prognosen"
+                    font.bold: true
+                    color: Theme.highlightColor
+                    font.pixelSize: Theme.fontSizeExtraLarge
+                    x: Theme.horizontalPageMargin
+                    width: parent.width - 2*x
+                }
+
+                // Estimated Total (Linear)
+                Column {
+                    width: parent.width
+                    spacing: Theme.paddingSmall
+
+                    Label {
+                        text: "Geschätzter Gesamtverbrauch (linear)"
+                        font.bold: true
+                        color: Theme.primaryColor
+                        x: Theme.horizontalPageMargin
+                        width: parent.width - 2*x
+                    }
+                    Label {
+                        id: estimatedSimpleValueLabel
+                        color: Theme.secondaryColor
+                        font.pixelSize: Theme.fontSizeMedium
+                        x: Theme.horizontalPageMargin
+                        width: parent.width - 2*x
+                        text: "-- GB"
+                    }
+                }
+
+                // Estimated Total (Trend)
+                Column {
+                    width: parent.width
+                    spacing: Theme.paddingSmall
+
+                    Label {
+                        text: "Geschätzter Gesamtverbrauch (Trend)"
+                        font.bold: true
+                        color: Theme.primaryColor
+                        x: Theme.horizontalPageMargin
+                        width: parent.width - 2*x
+                    }
+                    Label {
+                        id: estimatedTrendValueLabel
+                        color: Theme.secondaryColor
+                        font.pixelSize: Theme.fontSizeMedium
+                        x: Theme.horizontalPageMargin
+                        width: parent.width - 2*x
+                        text: "-- GB"
+                    }
+                }
             }
         }
     }
