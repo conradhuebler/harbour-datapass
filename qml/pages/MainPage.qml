@@ -11,16 +11,18 @@ Page {
         }
     }
 
-    // CircularProgressBar implementation
+    // Dual CircularProgressBar implementation
     Component {
         id: circularProgressBar
 
         Item {
             id: progressBarRoot
-            property real value: 0.0
-            property real lineWidth: 10
+            property real dataValue: 0.0
+            property real timeValue: 0.0
+            property real lineWidth: 12
             property color backgroundColor: Theme.rgba(Theme.primaryColor, 0.2)
-            property color progressColor: Theme.highlightColor
+            property color dataProgressColor: Theme.highlightColor
+            property color timeProgressColor: Theme.secondaryHighlightColor
 
             function forceRepaint() {
                 canvas.requestPaint()
@@ -34,24 +36,43 @@ Page {
                     var ctx = getContext("2d")
                     var centerX = width / 2
                     var centerY = height / 2
-                    var radius = Math.min(width, height) / 2 - progressBarRoot.lineWidth / 2
+                    var outerRadius = Math.min(width, height) / 2 - progressBarRoot.lineWidth / 2
+                    var innerRadius = outerRadius - progressBarRoot.lineWidth - 8
 
                     ctx.clearRect(0, 0, width, height)
 
-                    // Background circle
+                    // Outer circle (time) - background
                     ctx.beginPath()
-                    ctx.arc(centerX, centerY, radius, 0, 2 * Math.PI)
+                    ctx.arc(centerX, centerY, outerRadius, 0, 2 * Math.PI)
                     ctx.lineWidth = progressBarRoot.lineWidth
                     ctx.strokeStyle = progressBarRoot.backgroundColor
                     ctx.stroke()
 
-                    // Progress arc
-                    if (progressBarRoot.value > 0) {
+                    // Inner circle (data) - background
+                    ctx.beginPath()
+                    ctx.arc(centerX, centerY, innerRadius, 0, 2 * Math.PI)
+                    ctx.lineWidth = progressBarRoot.lineWidth
+                    ctx.strokeStyle = progressBarRoot.backgroundColor
+                    ctx.stroke()
+
+                    // Outer progress arc (time)
+                    if (progressBarRoot.timeValue > 0) {
                         ctx.beginPath()
-                        ctx.arc(centerX, centerY, radius, -Math.PI / 2,
-                               -Math.PI / 2 + 2 * Math.PI * progressBarRoot.value)
+                        ctx.arc(centerX, centerY, outerRadius, -Math.PI / 2,
+                               -Math.PI / 2 + 2 * Math.PI * progressBarRoot.timeValue)
                         ctx.lineWidth = progressBarRoot.lineWidth
-                        ctx.strokeStyle = progressBarRoot.progressColor
+                        ctx.strokeStyle = progressBarRoot.timeProgressColor
+                        ctx.lineCap = "round"
+                        ctx.stroke()
+                    }
+
+                    // Inner progress arc (data)
+                    if (progressBarRoot.dataValue > 0) {
+                        ctx.beginPath()
+                        ctx.arc(centerX, centerY, innerRadius, -Math.PI / 2,
+                               -Math.PI / 2 + 2 * Math.PI * progressBarRoot.dataValue)
+                        ctx.lineWidth = progressBarRoot.lineWidth
+                        ctx.strokeStyle = progressBarRoot.dataProgressColor
                         ctx.lineCap = "round"
                         ctx.stroke()
                     }
@@ -59,17 +80,30 @@ Page {
 
                 Connections {
                     target: progressBarRoot
-                    onValueChanged: canvas.requestPaint()
+                    onDataValueChanged: canvas.requestPaint()
+                    onTimeValueChanged: canvas.requestPaint()
                 }
             }
 
-            // Percentage text in center
-            Label {
+            // Center text with data percentage
+            Column {
                 anchors.centerIn: parent
-                text: Math.round(progressBarRoot.value * 100) + "%"
-                font.pixelSize: Theme.fontSizeExtraLarge
-                font.bold: true
-                color: Theme.primaryColor
+                spacing: Theme.paddingSmall
+
+                Label {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: Math.round(progressBarRoot.dataValue * 100) + "%"
+                    font.pixelSize: Theme.fontSizeExtraLarge
+                    font.bold: true
+                    color: Theme.primaryColor
+                }
+
+                Label {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: "Daten"
+                    font.pixelSize: Theme.fontSizeSmall
+                    color: Theme.secondaryColor
+                }
             }
         }
     }
@@ -173,9 +207,14 @@ Page {
         percentageValueLabel.text = data.usedPercentage + "%"
         remainingValueLabel.text = data.remainingTimeStr
 
-        // Update progress bar value
+        // Update progress bar values
         if (progressBar.item) {
-            progressBar.item.value = data.usedPercentage / 100
+            progressBar.item.dataValue = data.usedPercentage / 100
+
+            // Calculate time progress (percentage of billing period passed)
+            var totalSeconds = 30 * 24 * 60 * 60 // 30 days in seconds
+            var timeProgress = (totalSeconds - data.remainingSeconds) / totalSeconds
+            progressBar.item.timeValue = Math.max(0, Math.min(1, timeProgress))
         }
 
         // Simple linear projection
@@ -210,6 +249,11 @@ Page {
             app.coverData.percentage = data.usedPercentage
             app.coverData.remainingTimeStr = data.remainingTimeStr
             app.coverData.estimatedGB = simpleEstimate
+
+            // Calculate and set time progress for cover
+            var totalSeconds = 30 * 24 * 60 * 60
+            var timeProgress = (totalSeconds - data.remainingSeconds) / totalSeconds
+            app.coverData.timeProgress = Math.max(0, Math.min(1, timeProgress)) * 100
         } else {
             console.log("app.coverData not available")
         }
@@ -260,14 +304,56 @@ Page {
                 Component.onCompleted: {
                     if (item) {
                         item.lineWidth = 15
-                        item.value = 0.0
+                        item.dataValue = 0.0
+                        item.timeValue = 0.0
                     }
                 }
 
                 onItemChanged: {
                     if (item) {
                         item.lineWidth = 15
-                        item.value = 0.0
+                        item.dataValue = 0.0
+                        item.timeValue = 0.0
+                    }
+                }
+            }
+
+            // Legend for the dual circles
+            Row {
+                anchors.horizontalCenter: parent.horizontalCenter
+                spacing: Theme.paddingLarge
+
+                Row {
+                    spacing: Theme.paddingSmall
+                    Rectangle {
+                        width: 16
+                        height: 16
+                        radius: 8
+                        color: Theme.highlightColor
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                    Label {
+                        text: "Datenvolumen"
+                        font.pixelSize: Theme.fontSizeSmall
+                        color: Theme.secondaryColor
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                }
+
+                Row {
+                    spacing: Theme.paddingSmall
+                    Rectangle {
+                        width: 16
+                        height: 16
+                        radius: 8
+                        color: Theme.secondaryHighlightColor
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                    Label {
+                        text: "Abrechnungszeit"
+                        font.pixelSize: Theme.fontSizeSmall
+                        color: Theme.secondaryColor
+                        anchors.verticalCenter: parent.verticalCenter
                     }
                 }
             }

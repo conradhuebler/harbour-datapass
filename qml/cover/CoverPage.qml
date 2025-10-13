@@ -11,17 +11,19 @@ CoverBackground {
         }
     }
 
-    // CircularProgressBar implementation for Cover
+    // Dual CircularProgressBar implementation for Cover
     Item {
         id: coverProgress
         anchors.centerIn: parent
         width: parent.width * 0.8
         height: width
 
-        property real value: (typeof app !== 'undefined' && app.coverData) ? app.coverData.percentage / 100 : 0
-        property real lineWidth: 8
+        property real dataValue: (typeof app !== 'undefined' && app.coverData) ? app.coverData.percentage / 100 : 0
+        property real timeValue: (typeof app !== 'undefined' && app.coverData) ? app.coverData.timeProgress / 100 : 0
+        property real lineWidth: 6
         property color backgroundColor: Theme.rgba(Theme.primaryColor, 0.2)
-        property color progressColor: Theme.highlightColor
+        property color dataProgressColor: Theme.highlightColor
+        property color timeProgressColor: Theme.secondaryHighlightColor
 
         function forceRepaint() {
             canvas.requestPaint()
@@ -35,24 +37,43 @@ CoverBackground {
                 var ctx = getContext("2d")
                 var centerX = width / 2
                 var centerY = height / 2
-                var radius = Math.min(width, height) / 2 - coverProgress.lineWidth / 2
+                var outerRadius = Math.min(width, height) / 2 - coverProgress.lineWidth / 2
+                var innerRadius = outerRadius - coverProgress.lineWidth - 4
 
                 ctx.clearRect(0, 0, width, height)
 
-                // Background circle
+                // Outer circle (time) - background
                 ctx.beginPath()
-                ctx.arc(centerX, centerY, radius, 0, 2 * Math.PI)
+                ctx.arc(centerX, centerY, outerRadius, 0, 2 * Math.PI)
                 ctx.lineWidth = coverProgress.lineWidth
                 ctx.strokeStyle = coverProgress.backgroundColor
                 ctx.stroke()
 
-                // Progress arc
-                if (coverProgress.value > 0) {
+                // Inner circle (data) - background
+                ctx.beginPath()
+                ctx.arc(centerX, centerY, innerRadius, 0, 2 * Math.PI)
+                ctx.lineWidth = coverProgress.lineWidth
+                ctx.strokeStyle = coverProgress.backgroundColor
+                ctx.stroke()
+
+                // Outer progress arc (time)
+                if (coverProgress.timeValue > 0) {
                     ctx.beginPath()
-                    ctx.arc(centerX, centerY, radius, -Math.PI / 2,
-                           -Math.PI / 2 + 2 * Math.PI * coverProgress.value)
+                    ctx.arc(centerX, centerY, outerRadius, -Math.PI / 2,
+                           -Math.PI / 2 + 2 * Math.PI * coverProgress.timeValue)
                     ctx.lineWidth = coverProgress.lineWidth
-                    ctx.strokeStyle = coverProgress.progressColor
+                    ctx.strokeStyle = coverProgress.timeProgressColor
+                    ctx.lineCap = "round"
+                    ctx.stroke()
+                }
+
+                // Inner progress arc (data)
+                if (coverProgress.dataValue > 0) {
+                    ctx.beginPath()
+                    ctx.arc(centerX, centerY, innerRadius, -Math.PI / 2,
+                           -Math.PI / 2 + 2 * Math.PI * coverProgress.dataValue)
+                    ctx.lineWidth = coverProgress.lineWidth
+                    ctx.strokeStyle = coverProgress.dataProgressColor
                     ctx.lineCap = "round"
                     ctx.stroke()
                 }
@@ -60,15 +81,16 @@ CoverBackground {
 
             Connections {
                 target: coverProgress
-                onValueChanged: canvas.requestPaint()
+                onDataValueChanged: canvas.requestPaint()
+                onTimeValueChanged: canvas.requestPaint()
             }
         }
 
-        // Percentage text in center
+        // Center text with data percentage
         Label {
             anchors.centerIn: parent
-            text: Math.round(coverProgress.value * 100) + "%"
-            font.pixelSize: Theme.fontSizeLarge
+            text: Math.round(coverProgress.dataValue * 100) + "%"
+            font.pixelSize: Theme.fontSizeMedium
             font.bold: true
             color: Theme.primaryColor
         }
@@ -77,7 +99,11 @@ CoverBackground {
         Connections {
             target: (typeof app !== 'undefined' && app.coverData) ? app.coverData : null
             onPercentageChanged: {
-                coverProgress.value = app.coverData.percentage / 100
+                coverProgress.dataValue = app.coverData.percentage / 100
+                coverProgress.forceRepaint()
+            }
+            onTimeProgressChanged: {
+                coverProgress.timeValue = app.coverData.timeProgress / 100
                 coverProgress.forceRepaint()
             }
         }

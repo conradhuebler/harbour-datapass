@@ -12,6 +12,7 @@ ApplicationWindow
         property string usedVolumeStr: ""
         property string initialVolumeStr: ""
         property real percentage: 0
+        property real timeProgress: 0
         property string remainingTimeStr: ""
         property string estimatedGB: ""
 
