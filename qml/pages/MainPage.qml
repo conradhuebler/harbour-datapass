@@ -1,12 +1,39 @@
 import QtQuick 2.0
 import Sailfish.Silica 1.0
 import QtQuick.LocalStorage 2.0
+import Nemo.Configuration 1.0
 
 Page {
     id: page
+    // Loading state for network requests
+    property bool loading: false
+    // Indicates whether we are showing fallback demo data
+    property bool demoMode: false
+    // Model for daily consumption overview
+    ListModel { id: dailyModel }
+
+    // Configuration values (persistent via Nemo.Configuration)
+    ConfigurationGroup {
+        id: configGroup
+        path: "/apps/harbour-datapass"
+
+        ConfigurationValue {
+            id: refreshIntervalConfig
+            key: "refreshInterval"
+            defaultValue: 10800000  // 3 hours in milliseconds
+        }
+
+        ConfigurationValue {
+            id: retentionDaysConfig
+            key: "retentionDays"
+            defaultValue: 30  // days
+        }
+    }
 
     onStatusChanged: {
         if (status === PageStatus.Active) {
+            // Refresh configurable interval when page becomes active
+            refreshInterval = refreshIntervalConfig.value
             getData()
         }
     }
@@ -100,7 +127,7 @@ Page {
 
                 Label {
                     anchors.horizontalCenter: parent.horizontalCenter
-                    text: "Daten"
+                    text: qsTr("Daten")
                     font.pixelSize: Theme.fontSizeSmall
                     color: Theme.secondaryColor
                 }
@@ -108,24 +135,84 @@ Page {
         }
     }
 
-    // Database functions
+    // -----------------------------------------------
+    // Constants & helper functions (centralised)
+    // -----------------------------------------------
+    property int totalSeconds: 30 * 24 * 60 * 60   // 30‑day billing period in seconds
+    property int refreshInterval: refreshIntervalConfig.value        // 3 h in ms (periodic API pull)
+    property string dbName: "TelekomData"
+
+    function bytesToGB(bytes) {
+        return bytes / 1073741824;
+    }
+
+    function calcTimeProgress(remainingSec) {
+        var prog = (totalSeconds - remainingSec) / totalSeconds;
+        return Math.max(0, Math.min(1, prog));
+    }
+
+    // Database functions (using above constants)
     function getDatabase() {
-        return LocalStorage.openDatabaseSync("TelekomData", "1.0", "Stores usage data", 1000000);
+        return LocalStorage.openDatabaseSync(dbName, "1.0", "Stores usage data", 1000000);
     }
 
     function initDatabase() {
         var db = getDatabase();
         db.transaction(function(tx) {
-            tx.executeSql('CREATE TABLE IF NOT EXISTS usage_data(timestamp INTEGER PRIMARY KEY, used_volume INTEGER, remaining_seconds INTEGER)');
+            tx.executeSql('CREATE TABLE IF NOT EXISTS usage_data(' +
+                         'timestamp INTEGER PRIMARY KEY, ' +
+                         'used_volume INTEGER, ' +
+                         'remaining_seconds INTEGER)');
+            // Index improves recent‑data queries
+            tx.executeSql('CREATE INDEX IF NOT EXISTS idx_timestamp ON usage_data(timestamp)');
+            
+            // Neue Tabelle für tägliche Zusammenfassungen
+            tx.executeSql('CREATE TABLE IF NOT EXISTS daily_usage(' +
+                         'date TEXT PRIMARY KEY, ' +
+                         'used_volume_start INTEGER, ' +
+                         'used_volume_end INTEGER, ' +
+                         'daily_consumption INTEGER, ' +
+                         'timestamp INTEGER)');
+            tx.executeSql('CREATE INDEX IF NOT EXISTS idx_daily_date ON daily_usage(date)');
+
         });
     }
 
     function saveData(data) {
         var db = getDatabase();
         var timestamp = new Date().getTime();
+        var dateStr = new Date(timestamp).toISOString().slice(0, 10); // YYYY-MM-DD
         db.transaction(function(tx) {
-            tx.executeSql('INSERT INTO usage_data VALUES(?, ?, ?)',
-                         [timestamp, data.usedVolume, data.remainingSeconds]);
+            // Insert new usage entry
+            var ins = tx.executeSql('INSERT INTO usage_data VALUES(?, ?, ?)',
+                                   [timestamp, data.usedVolume, data.remainingSeconds]);
+            // SQLite errors are reported via the result object's `message` property
+            if (ins && ins.message) {
+                console.log('DB insert error:', ins.message);
+            }
+
+            // Update daily aggregation table
+            // Try to update existing row for today
+            var upd = tx.executeSql('SELECT used_volume_start, used_volume_end FROM daily_usage WHERE date = ?', [dateStr]);
+            if (upd.rows.length === 0) {
+                // No entry yet – create one with start and end equal to current value
+                tx.executeSql('INSERT INTO daily_usage (date, used_volume_start, used_volume_end, daily_consumption, timestamp) VALUES(?, ?, ?, ?, ?)',
+                             [dateStr, data.usedVolume, data.usedVolume, 0, timestamp]);
+            } else {
+                var row = upd.rows.item(0);
+                var startVal = row.used_volume_start;
+                // Update end value and compute consumption for the day
+                var consumption = data.usedVolume - startVal;
+                tx.executeSql('UPDATE daily_usage SET used_volume_end = ?, daily_consumption = ?, timestamp = ? WHERE date = ?',
+                             [data.usedVolume, consumption, timestamp, dateStr]);
+            }
+
+            // Remove entries older than 30 days to keep DB lean (both tables)
+            // Use configurable retention period (default 30 days)
+            var retentionDays = retentionDaysConfig.value;
+            var cutoff = new Date().getTime() - (retentionDays * 24 * 60 * 60 * 1000);
+            tx.executeSql('DELETE FROM usage_data WHERE timestamp < ?', [cutoff]);
+            tx.executeSql('DELETE FROM daily_usage WHERE timestamp < ?', [cutoff]);
         });
     }
 
@@ -142,87 +229,147 @@ Page {
         return data;
     }
 
+    // Load daily aggregation data into ListModel
+    function loadDailyData() {
+        dailyModel.clear();
+        var db = getDatabase();
+        db.transaction(function(tx) {
+            var rs = tx.executeSql('SELECT date, daily_consumption FROM daily_usage ORDER BY date DESC LIMIT 7');
+            for (var i = 0; i < rs.rows.length; i++) {
+                var row = rs.rows.item(i);
+                dailyModel.append({ date: row.date, daily_consumption: row.daily_consumption });
+            }
+        });
+    }
+
     // Simple linear projection
-    function calculateSimpleEstimate(usedVolume, totalSeconds, remainingSeconds) {
-        var usedDays = (totalSeconds - remainingSeconds) / 86400
-        var dailyUsage = usedVolume / usedDays
-        var totalDays = totalSeconds / 86400
-        var estimatedTotal = dailyUsage * totalDays
-        return (estimatedTotal / 1073741824).toFixed(2)
+    function calculateSimpleEstimate(usedVolume, remainingSeconds) {
+        var usedDays = (totalSeconds - remainingSeconds) / 86400;
+        if (usedDays <= 0) {
+            return (bytesToGB(usedVolume)).toFixed(2);
+        }
+        var dailyUsage = usedVolume / usedDays;
+        var totalDays = totalSeconds / 86400;
+        var estimatedTotal = dailyUsage * totalDays;
+        return (estimatedTotal / 1073741824).toFixed(2);
     }
 
     // Trend-based calculation
-    function calculateTrendEstimate() {
-        var historicalData = getHistoricalData();
-        if(historicalData.length < 2) return null;
-
-        var firstEntry = historicalData[historicalData.length-1];
-        var lastEntry = historicalData[0];
-        var daysDiff = (lastEntry.timestamp - firstEntry.timestamp) / (24 * 60 * 60 * 1000);
-        var volumeDiff = lastEntry.used_volume - firstEntry.used_volume;
-
-        return daysDiff > 0 ? volumeDiff / daysDiff / 1073741824 : 0;
+    // Retrieve daily usage entries for the last N days (default 7)
+    function getDailyHistoricalData(days) {
+        days = days || 7;
+        var db = getDatabase();
+        var result = [];
+        var cutoff = new Date().getTime() - (days * 24 * 60 * 60 * 1000);
+        db.transaction(function(tx) {
+            var rs = tx.executeSql('SELECT * FROM daily_usage WHERE timestamp > ? ORDER BY timestamp DESC', [cutoff]);
+            for (var i = 0; i < rs.rows.length; i++) {
+                result.push(rs.rows.item(i));
+            }
+        });
+        return result;
     }
 
+    // Trend estimation based on daily consumption of the last 7 days
+    function calculateTrendEstimate() {
+        var dailyData = getDailyHistoricalData(7);
+        if (dailyData.length < 2) return null;
+        var totalConsumption = 0;
+        var daysCount = 0;
+        for (var i = 0; i < dailyData.length; i++) {
+            // daily_consumption may be negative on the first entry of the day; ignore if zero or negative
+            var consumption = dailyData[i].daily_consumption;
+            if (consumption > 0) {
+                totalConsumption += consumption;
+                daysCount++;
+            }
+        }
+        if (daysCount === 0) return null;
+        var avgDailyGB = (totalConsumption / daysCount) / 1073741824;
+        return avgDailyGB; // GB per day
+    }
+
+    // ------ Timer for periodic refresh (uses constant)
     Timer {
-        interval: 10800000 // 3 hours
+        interval: refreshInterval
         running: true
         repeat: true
         onTriggered: getData()
     }
 
-    function getData() {
+    // ------ Network request with timeout & simple retry ------
+    function getData(retryCount) {
+        // Indicate loading UI
+        page.loading = true;
+        retryCount = retryCount || 0;
         var xhr = new XMLHttpRequest();
+        xhr.timeout = 15000; // 15 s
         xhr.onreadystatechange = function() {
             if (xhr.readyState === XMLHttpRequest.DONE) {
+                page.loading = false;
                 if (xhr.status === 200) {
                     var data = JSON.parse(xhr.responseText);
                     saveData(data);
                     updateUI(data);
                 } else {
-                    // Handle error case - show demo data
-                    console.log("API Error, using demo data. Status:", xhr.status)
-                    var demoData = {
-                        title: "Demo Datenverbrauch",
-                        usedVolumeStr: "15.2 GB",
-                        initialVolumeStr: "30 GB",
-                        usedPercentage: 50.7,
-                        remainingTimeStr: "14 Tage 12 Stunden",
-                        usedVolume: 16321798144, // bytes
-                        remainingSeconds: 1244160 // seconds
-                    };
-                    updateUI(demoData);
+                    // retry once on server (5xx) errors
+                    if (retryCount < 1 && xhr.status >= 500) {
+                        console.log("Retrying after server error", xhr.status);
+                        getData(retryCount + 1);
+                        return;
+                    }
+                    console.log("API Error, using demo data. Status:", xhr.status);
+                    loadDemoData();
                 }
             }
-        }
+        };
+        xhr.ontimeout = function() {
+            page.loading = false;
+            console.log("Request timed out – using demo data");
+            loadDemoData();
+        };
         xhr.open("GET", "https://pass.telekom.de/api/service/generic/v1/status");
         xhr.send();
     }
 
+    function loadDemoData() {
+        page.demoMode = true;
+        var demoData = {
+            title: qsTr("Demo Datenverbrauch"),
+            usedVolumeStr: "15.2 GB",
+            initialVolumeStr: "30 GB",
+            usedPercentage: 50.7,
+            remainingTimeStr: qsTr("14 Tage 12 Stunden"),
+            usedVolume: 16321798144,
+            remainingSeconds: 1244160
+        };
+        updateUI(demoData);
+    }
+
     function updateUI(data) {
         console.log("Updating UI with data:", JSON.stringify(data))
+
+        // Reset demo flag when real data arrives
+        if (page.demoMode && !data.title.includes("Demo")) {
+            page.demoMode = false;
+        }
 
         titleLabel.text = data.title || "Telekom Datenverbrauch"
         volumeValueLabel.text = data.usedVolumeStr + " / " + data.initialVolumeStr
         percentageValueLabel.text = data.usedPercentage + "%"
         remainingValueLabel.text = data.remainingTimeStr
 
-        // Update progress bar values
+        // Update progress bar values using shared helpers
         if (progressBar.item) {
             progressBar.item.dataValue = data.usedPercentage / 100
-
-            // Calculate time progress (percentage of billing period passed)
-            var totalSeconds = 30 * 24 * 60 * 60 // 30 days in seconds
-            var timeProgress = (totalSeconds - data.remainingSeconds) / totalSeconds
-            progressBar.item.timeValue = Math.max(0, Math.min(1, timeProgress))
+            progressBar.item.timeValue = calcTimeProgress(data.remainingSeconds)
         }
 
-        // Simple linear projection
-        var totalSeconds = 30 * 24 * 60 * 60
-        var simpleEstimate = calculateSimpleEstimate(data.usedVolume, totalSeconds, data.remainingSeconds)
+        // Simple linear projection (uses property totalSeconds)
+        var simpleEstimate = calculateSimpleEstimate(data.usedVolume, data.remainingSeconds)
         estimatedSimpleValueLabel.text = simpleEstimate + " GB"
 
-        // Current average usage
+        // Current average usage based on totalSeconds property
         var usedDays = (totalSeconds - data.remainingSeconds) / 86400
         var dailyAverage = (data.usedVolume / 1073741824 / usedDays).toFixed(2)
         averageValueLabel.text = dailyAverage + " GB/Tag"
@@ -250,9 +397,8 @@ Page {
             app.coverData.remainingTimeStr = data.remainingTimeStr
             app.coverData.estimatedGB = simpleEstimate
 
-            // Calculate and set time progress for cover
-            var totalSeconds = 30 * 24 * 60 * 60
-            var timeProgress = (totalSeconds - data.remainingSeconds) / totalSeconds
+            // Calculate and set time progress for cover (uses helper)
+            var timeProgress = calcTimeProgress(data.remainingSeconds)
             app.coverData.timeProgress = Math.max(0, Math.min(1, timeProgress)) * 100
         } else {
             console.log("app.coverData not available")
@@ -262,16 +408,30 @@ Page {
         if (progressBar.item) {
             progressBar.item.forceRepaint()
         }
+        // Refresh daily list model
+        loadDailyData();
     }
 
-    SilicaFlickable {
+        SilicaFlickable {
+            // Show BusyIndicator when loading data
+            BusyIndicator {
+                id: busyInd
+                running: page.loading
+                anchors.centerIn: parent
+                visible: page.loading
+                size: BusyIndicatorSize.Large
+            }
         anchors.fill: parent
         contentHeight: column.height
 
         PullDownMenu {
             MenuItem {
-                text: "Aktualisieren"
+                text: qsTr("Aktualisieren")
                 onClicked: getData()
+            }
+            MenuItem {
+                text: qsTr("Einstellungen")
+                onClicked: pageStack.push(Qt.resolvedUrl("SettingsPage.qml"))
             }
         }
 
@@ -281,7 +441,18 @@ Page {
             spacing: Theme.paddingLarge
 
             PageHeader {
-                title: "Telekom Datenverbrauch"
+                title: qsTr("Telekom Datenverbrauch")
+            }
+            // Show a warning when demo data is used
+            Label {
+                id: errorLabel
+                visible: page.demoMode
+                text: qsTr("API unavailable – using demo data")
+                color: Theme.highlightColor
+                font.pixelSize: Theme.fontSizeSmall
+                horizontalAlignment: Text.AlignHCenter
+                anchors.horizontalCenter: parent.horizontalCenter
+                // topMargin removed – Column handles spacing
             }
 
             Label {
@@ -391,8 +562,8 @@ Page {
                     width: parent.width
                     spacing: Theme.paddingSmall
 
-                    Label {
-                        text: "Verbrauch in Prozent"
+                Label {
+                    text: qsTr("Verbrauch in Prozent")
                         font.bold: true
                         color: Theme.highlightColor
                         font.pixelSize: Theme.fontSizeLarge
@@ -414,8 +585,8 @@ Page {
                     width: parent.width
                     spacing: Theme.paddingSmall
 
-                    Label {
-                        text: "Verbleibende Zeit"
+                Label {
+                    text: qsTr("Verbleibende Zeit")
                         font.bold: true
                         color: Theme.highlightColor
                         font.pixelSize: Theme.fontSizeLarge
@@ -439,7 +610,7 @@ Page {
 
                 // Statistics Section
                 Label {
-                    text: "Statistiken"
+                    text: qsTr("Statistiken")
                     font.bold: true
                     color: Theme.highlightColor
                     font.pixelSize: Theme.fontSizeExtraLarge
@@ -452,8 +623,8 @@ Page {
                     width: parent.width
                     spacing: Theme.paddingSmall
 
-                    Label {
-                        text: "Durchschnittlicher täglicher Verbrauch"
+                Label {
+                    text: qsTr("Durchschnittlicher täglicher Verbrauch")
                         font.bold: true
                         color: Theme.primaryColor
                         x: Theme.horizontalPageMargin
@@ -474,8 +645,8 @@ Page {
                     width: parent.width
                     spacing: Theme.paddingSmall
 
-                    Label {
-                        text: "Trend (letzte 7 Tage)"
+                Label {
+                    text: qsTr("Trend (letzte 7 Tage)")
                         font.bold: true
                         color: Theme.primaryColor
                         x: Theme.horizontalPageMargin
@@ -498,7 +669,7 @@ Page {
 
                 // Projections Section
                 Label {
-                    text: "Prognosen"
+                    text: qsTr("Prognosen")
                     font.bold: true
                     color: Theme.highlightColor
                     font.pixelSize: Theme.fontSizeExtraLarge
@@ -511,8 +682,8 @@ Page {
                     width: parent.width
                     spacing: Theme.paddingSmall
 
-                    Label {
-                        text: "Geschätzter Gesamtverbrauch (linear)"
+                Label {
+                    text: qsTr("Geschätzter Gesamtverbrauch (linear)")
                         font.bold: true
                         color: Theme.primaryColor
                         x: Theme.horizontalPageMargin
@@ -529,31 +700,60 @@ Page {
                 }
 
                 // Estimated Total (Trend)
-                Column {
-                    width: parent.width
-                    spacing: Theme.paddingSmall
+            Column {
+                width: parent.width
+                spacing: Theme.paddingSmall
 
+            Label {
+                text: qsTr("Geschätzter Gesamtverbrauch (Trend)")
+                    font.bold: true
+                    color: Theme.primaryColor
+                    x: Theme.horizontalPageMargin
+                    width: parent.width - 2*x
+                }
+                Label {
+                    id: estimatedTrendValueLabel
+                    color: Theme.secondaryColor
+                    font.pixelSize: Theme.fontSizeMedium
+                    x: Theme.horizontalPageMargin
+                    width: parent.width - 2*x
+                    text: "-- GB"
+                }
+            }
+            // Daily usage list
+            Label {
+                text: qsTr("Verbrauch pro Tag (letzte 7 Tage)")
+                font.bold: true
+                color: Theme.highlightColor
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2*x
+            }
+            ListView {
+                id: dailyList
+                width: parent.width
+                height: dailyModel.count * (Theme.itemSizeSmall + Theme.paddingSmall)
+                model: dailyModel
+                delegate: Row {
+                    width: parent.width
+                    spacing: Theme.paddingMedium
                     Label {
-                        text: "Geschätzter Gesamtverbrauch (Trend)"
-                        font.bold: true
-                        color: Theme.primaryColor
-                        x: Theme.horizontalPageMargin
-                        width: parent.width - 2*x
+                        text: model.date
+                        width: parent.width * 0.5
                     }
                     Label {
-                        id: estimatedTrendValueLabel
-                        color: Theme.secondaryColor
-                        font.pixelSize: Theme.fontSizeMedium
-                        x: Theme.horizontalPageMargin
-                        width: parent.width - 2*x
-                        text: "-- GB"
+                        // daily_consumption stored in bytes, convert to GB
+                        text: (model.daily_consumption / 1073741824).toFixed(2) + " GB"
+                        horizontalAlignment: Text.AlignRight
+                        width: parent.width * 0.5
                     }
                 }
             }
         }
     }
+    }
 
     Component.onCompleted: {
+        // Settings are managed by Nemo.Configuration in the settings object
         initDatabase()
         getData()
     }

@@ -17,6 +17,7 @@ CONFIG += sailfishapp_qml
 DISTFILES += qml/harbour-datapass.qml \
     qml/cover/CoverPage.qml \
     qml/pages/MainPage.qml \
+    qml/utils.js \
     rpm/README \
     rpm/harbour-datapass.changes.in \
     rpm/harbour-datapass.changes.run.in \

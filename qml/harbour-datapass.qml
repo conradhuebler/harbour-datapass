@@ -27,7 +27,7 @@ ApplicationWindow
     // Make coverData accessible globally
     property alias coverData: coverData
 
-    initialPage: Component { MainPage { } }
+    initialPage: Qt.resolvedUrl("pages/MainPage.qml")
     cover: Qt.resolvedUrl("cover/CoverPage.qml")
     allowedOrientations: defaultAllowedOrientations
 }
