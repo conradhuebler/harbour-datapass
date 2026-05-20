@@ -5,6 +5,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -48,6 +51,6 @@ jobs:
         with:
           tag_name: continuous
           name: Continuous Build
-          body: "Automatischer Build vom ${{ github.sha }}"
+          body: "Automatic build from ${{ github.sha }}"
           prerelease: true
           files: RPMS/*.rpm
